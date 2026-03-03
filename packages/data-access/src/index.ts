@@ -714,3 +714,116 @@ function assertPositiveSessionCount(value: number): void {
     throw new Error(`sessionCount must be a positive integer. received=${value}`);
   }
 }
+
+// --- Template repository (ST-06-03) ---
+
+export interface StoredTemplate {
+  id: string;
+  schemaVersion: string;
+  title: string;
+  category: string;
+  description: string;
+  tier: "starter_free" | "premium";
+  ownership: "builtin" | "user";
+  modelFamilies: string[];
+  promptBody: string;
+  variables: Record<string, unknown>[];
+  tags: string[];
+  suggestedTechniques: string[];
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TemplateFilter {
+  category?: string;
+  tier?: string;
+  modelFamily?: string;
+  ownership?: string;
+  search?: string;
+}
+
+export interface TemplateRepository {
+  create(template: StoredTemplate): Promise<StoredTemplate>;
+  getById(id: string): Promise<StoredTemplate | undefined>;
+  listByUser(userId: string, filter?: TemplateFilter): Promise<StoredTemplate[]>;
+  update(id: string, fields: Partial<StoredTemplate>): Promise<StoredTemplate | undefined>;
+  delete(id: string): Promise<boolean>;
+  countByUser(userId: string): Promise<number>;
+}
+
+export class InMemoryTemplateRepository implements TemplateRepository {
+  private readonly store = new Map<string, StoredTemplate>();
+  private idCounter = 0;
+
+  /** Seed built-in templates */
+  seed(templates: StoredTemplate[]): void {
+    for (const t of templates) {
+      this.store.set(t.id, { ...t });
+    }
+  }
+
+  async create(template: StoredTemplate): Promise<StoredTemplate> {
+    const record = { ...template };
+    if (!record.id) {
+      this.idCounter += 1;
+      record.id = `tpl-user-${this.idCounter}`;
+    }
+    this.store.set(record.id, record);
+    return record;
+  }
+
+  async getById(id: string): Promise<StoredTemplate | undefined> {
+    const t = this.store.get(id);
+    return t ? { ...t } : undefined;
+  }
+
+  async listByUser(userId: string, filter?: TemplateFilter): Promise<StoredTemplate[]> {
+    let results = Array.from(this.store.values()).filter(
+      (t) => t.ownership === "builtin" || t.createdBy === userId
+    );
+
+    if (filter?.category) {
+      results = results.filter((t) => t.category === filter.category);
+    }
+    if (filter?.tier) {
+      results = results.filter((t) => t.tier === filter.tier);
+    }
+    if (filter?.modelFamily) {
+      results = results.filter((t) => t.modelFamilies.includes(filter.modelFamily!));
+    }
+    if (filter?.ownership) {
+      results = results.filter((t) => t.ownership === filter.ownership);
+    }
+    if (filter?.search) {
+      const q = filter.search.toLowerCase();
+      results = results.filter(
+        (t) =>
+          t.title.toLowerCase().includes(q) ||
+          t.description.toLowerCase().includes(q) ||
+          t.tags.some((tag) => tag.toLowerCase().includes(q))
+      );
+    }
+
+    return results.map((t) => ({ ...t }));
+  }
+
+  async update(id: string, fields: Partial<StoredTemplate>): Promise<StoredTemplate | undefined> {
+    const existing = this.store.get(id);
+    if (!existing) return undefined;
+
+    const updated: StoredTemplate = { ...existing, ...fields, id: existing.id };
+    this.store.set(id, updated);
+    return { ...updated };
+  }
+
+  async delete(id: string): Promise<boolean> {
+    return this.store.delete(id);
+  }
+
+  async countByUser(userId: string): Promise<number> {
+    return Array.from(this.store.values()).filter(
+      (t) => t.ownership === "user" && t.createdBy === userId
+    ).length;
+  }
+}

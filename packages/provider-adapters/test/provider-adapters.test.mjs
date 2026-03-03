@@ -9,10 +9,16 @@ import {
   ValidationError,
   createAnthropicAdapter,
   createGeminiAdapter,
+  createOpenRouterAdapter,
+  createGroqAdapter,
+  createOllamaAdapter,
   ProviderError,
   createNoopAdapter,
   createOpenAIAdapter,
-  normalizeProviderError
+  normalizeProviderError,
+  PROVIDER_CAPABILITY_MATRIX,
+  preflightValidate,
+  getProviderCapabilities
 } from "../dist/index.js";
 
 test("noop adapter satisfies baseline provider contract", async () => {
@@ -400,3 +406,321 @@ function toHeaderObject(headers) {
   }
   return out;
 }
+
+// --- OpenRouter adapter tests (ST-04-03) ---
+
+test("openrouter adapter maps request with site headers", async () => {
+  const calls = [];
+  const adapter = createOpenRouterAdapter({
+    apiKey: "test-or-key",
+    model: "anthropic/claude-3.5-sonnet",
+    siteUrl: "https://prmpt.dev",
+    siteName: "prmpt",
+    fetchFn: async (input, init) => {
+      calls.push({ input, init });
+      return jsonResponse({
+        choices: [{ message: { content: "Optimized by OpenRouter." } }],
+        usage: { prompt_tokens: 10, completion_tokens: 6 }
+      });
+    }
+  });
+
+  const result = await adapter.optimize({
+    prompt: "Optimize this prompt via OpenRouter.",
+    modelFamily: "claude",
+    outputFormat: "markdown"
+  });
+
+  assert.equal(result.optimizedPrompt, "Optimized by OpenRouter.");
+  assert.equal(calls.length, 1);
+
+  const call = calls[0];
+  assert.equal(String(call.input), "https://openrouter.ai/api/v1/chat/completions");
+  const headers = toHeaderObject(call.init?.headers);
+  assert.equal(headers.authorization, "Bearer test-or-key");
+  assert.equal(headers["http-referer"], "https://prmpt.dev");
+  assert.equal(headers["x-title"], "prmpt");
+});
+
+test("openrouter adapter accepts any model family", async () => {
+  const adapter = createOpenRouterAdapter({
+    apiKey: "test-or-key",
+    model: "google/gemini-2.0-flash",
+    fetchFn: async () =>
+      jsonResponse({
+        choices: [{ message: { content: "OK." } }],
+        usage: { prompt_tokens: 5, completion_tokens: 1 }
+      })
+  });
+
+  const result = await adapter.optimize({
+    prompt: "Test gemini via OpenRouter.",
+    modelFamily: "gemini",
+    outputFormat: "text"
+  });
+
+  assert.equal(result.optimizedPrompt, "OK.");
+});
+
+test("openrouter adapter supports streaming", async () => {
+  const adapter = createOpenRouterAdapter({
+    apiKey: "test-or-key",
+    model: "openai/gpt-4o",
+    fetchFn: async () =>
+      sseResponse(
+        [
+          'data: {"choices":[{"delta":{"content":"Hi "}}]}',
+          'data: {"choices":[{"delta":{"content":"there"}}]}',
+          "data: [DONE]"
+        ].join("\n\n")
+      )
+  });
+
+  const chunks = [];
+  for await (const chunk of adapter.streamOptimize({
+    prompt: "stream test",
+    modelFamily: "gpt",
+    outputFormat: "markdown",
+    stream: true
+  })) {
+    chunks.push(chunk);
+  }
+
+  assert.equal(chunks.length, 3);
+  assert.equal(chunks[0].delta, "Hi ");
+  assert.equal(chunks[1].delta, "there");
+  assert.equal(chunks[2].done, true);
+});
+
+// --- Groq adapter tests (ST-04-03) ---
+
+test("groq adapter maps request without response_format", async () => {
+  const calls = [];
+  const adapter = createGroqAdapter({
+    apiKey: "test-groq-key",
+    model: "llama-3.3-70b-versatile",
+    fetchFn: async (input, init) => {
+      calls.push({ input, init });
+      return jsonResponse({
+        choices: [{ message: { content: "Optimized by Groq." } }],
+        usage: { prompt_tokens: 8, completion_tokens: 4 }
+      });
+    }
+  });
+
+  const result = await adapter.optimize({
+    prompt: "Optimize via Groq.",
+    modelFamily: "gpt",
+    outputFormat: "json"
+  });
+
+  assert.equal(result.optimizedPrompt, "Optimized by Groq.");
+  assert.equal(calls.length, 1);
+
+  const call = calls[0];
+  assert.equal(String(call.input), "https://api.groq.com/openai/v1/chat/completions");
+  const body = JSON.parse(String(call.init?.body));
+  assert.equal(body.response_format, undefined, "Groq should not send response_format");
+  assert.equal(body.model, "llama-3.3-70b-versatile");
+});
+
+test("groq adapter supports streaming", async () => {
+  const adapter = createGroqAdapter({
+    apiKey: "test-groq-key",
+    model: "llama-3.3-70b-versatile",
+    fetchFn: async () =>
+      sseResponse(
+        [
+          'data: {"choices":[{"delta":{"content":"Fast "}}]}',
+          'data: {"choices":[{"delta":{"content":"inference"}}]}',
+          "data: [DONE]"
+        ].join("\n\n")
+      )
+  });
+
+  const chunks = [];
+  for await (const chunk of adapter.streamOptimize({
+    prompt: "stream me",
+    modelFamily: "gpt",
+    outputFormat: "markdown",
+    stream: true
+  })) {
+    chunks.push(chunk);
+  }
+
+  assert.equal(chunks.length, 3);
+  assert.equal(chunks[0].delta, "Fast ");
+  assert.equal(chunks[2].done, true);
+});
+
+// --- Ollama adapter tests (ST-04-04) ---
+
+test("ollama adapter maps request without auth headers", async () => {
+  const calls = [];
+  const adapter = createOllamaAdapter({
+    model: "llama3.2",
+    fetchFn: async (input, init) => {
+      calls.push({ input, init });
+      return jsonResponse({
+        choices: [{ message: { content: "Optimized locally." } }],
+        usage: { prompt_tokens: 6, completion_tokens: 3 }
+      });
+    }
+  });
+
+  const result = await adapter.optimize({
+    prompt: "Optimize this locally.",
+    modelFamily: "local",
+    outputFormat: "markdown"
+  });
+
+  assert.equal(result.optimizedPrompt, "Optimized locally.");
+  assert.equal(calls.length, 1);
+
+  const call = calls[0];
+  assert.equal(String(call.input), "http://localhost:11434/v1/chat/completions");
+  const headers = toHeaderObject(call.init?.headers);
+  assert.equal(headers.authorization, undefined, "Ollama should not send Authorization header");
+
+  const body = JSON.parse(String(call.init?.body));
+  assert.equal(body.response_format, undefined, "Ollama should not send response_format");
+  assert.equal(body.model, "llama3.2");
+});
+
+test("ollama adapter rejects non-local model family", async () => {
+  const adapter = createOllamaAdapter({
+    model: "llama3.2",
+    fetchFn: async () => jsonResponse({})
+  });
+
+  await assert.rejects(
+    () =>
+      adapter.optimize({
+        prompt: "wrong family",
+        modelFamily: "gpt",
+        outputFormat: "markdown"
+      }),
+    (error) => error instanceof ValidationError
+  );
+});
+
+test("ollama adapter health check uses /api/tags endpoint", async () => {
+  const calls = [];
+  const adapter = createOllamaAdapter({
+    model: "llama3.2",
+    fetchFn: async (input) => {
+      calls.push(String(input));
+      return jsonResponse({ models: [{ name: "llama3.2" }] });
+    }
+  });
+
+  const health = await adapter.healthCheck();
+  assert.equal(health.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0], "http://localhost:11434/api/tags");
+});
+
+test("ollama adapter supports streaming", async () => {
+  const adapter = createOllamaAdapter({
+    model: "llama3.2",
+    fetchFn: async () =>
+      sseResponse(
+        [
+          'data: {"choices":[{"delta":{"content":"Local "}}]}',
+          'data: {"choices":[{"delta":{"content":"model"}}]}',
+          "data: [DONE]"
+        ].join("\n\n")
+      )
+  });
+
+  const chunks = [];
+  for await (const chunk of adapter.streamOptimize({
+    prompt: "stream local",
+    modelFamily: "local",
+    outputFormat: "text",
+    stream: true
+  })) {
+    chunks.push(chunk);
+  }
+
+  assert.equal(chunks.length, 3);
+  assert.equal(chunks[0].delta, "Local ");
+  assert.equal(chunks[2].done, true);
+});
+
+test("ollama adapter supports custom base URL", async () => {
+  const calls = [];
+  const adapter = createOllamaAdapter({
+    model: "phi3",
+    baseUrl: "http://192.168.1.100:11434",
+    fetchFn: async (input) => {
+      calls.push(String(input));
+      return jsonResponse({
+        choices: [{ message: { content: "OK." } }],
+        usage: { prompt_tokens: 3, completion_tokens: 1 }
+      });
+    }
+  });
+
+  await adapter.optimize({
+    prompt: "test custom base",
+    modelFamily: "local",
+    outputFormat: "text"
+  });
+
+  assert.equal(calls[0], "http://192.168.1.100:11434/v1/chat/completions");
+});
+
+// --- Capability matrix tests (ST-04-05) ---
+
+test("PROVIDER_CAPABILITY_MATRIX covers all six providers", () => {
+  const providers = ["openai", "anthropic", "gemini", "openrouter", "groq", "ollama"];
+  for (const provider of providers) {
+    const caps = PROVIDER_CAPABILITY_MATRIX[provider];
+    assert.ok(caps, `Missing capabilities for ${provider}`);
+    assert.equal(typeof caps.streaming, "boolean");
+    assert.equal(typeof caps.structuredOutput, "boolean");
+    assert.equal(typeof caps.reasoning, "boolean");
+    assert.equal(typeof caps.routing, "boolean");
+  }
+});
+
+test("getProviderCapabilities returns correct caps", () => {
+  const caps = getProviderCapabilities("openrouter");
+  assert.equal(caps.routing, true);
+  assert.equal(caps.streaming, true);
+});
+
+test("preflightValidate adjusts json format for non-structured providers", () => {
+  const result = preflightValidate(
+    { prompt: "test", modelFamily: "local", outputFormat: "json", stream: false },
+    PROVIDER_CAPABILITY_MATRIX.ollama
+  );
+
+  assert.equal(result.valid, true);
+  assert.equal(result.adjustedRequest.outputFormat, "markdown");
+  assert.ok(result.warnings.some((w) => /json/i.test(w)));
+});
+
+test("preflightValidate passes through valid request unchanged", () => {
+  const request = { prompt: "test", modelFamily: "gpt", outputFormat: "json", stream: true };
+  const result = preflightValidate(request, PROVIDER_CAPABILITY_MATRIX.openai);
+
+  assert.equal(result.valid, true);
+  assert.equal(result.warnings.length, 0);
+  assert.equal(result.adjustedRequest.outputFormat, "json");
+  assert.equal(result.adjustedRequest.stream, true);
+});
+
+test("openrouter has routing capability, others do not", () => {
+  assert.equal(PROVIDER_CAPABILITY_MATRIX.openrouter.routing, true);
+  assert.equal(PROVIDER_CAPABILITY_MATRIX.openai.routing, false);
+  assert.equal(PROVIDER_CAPABILITY_MATRIX.groq.routing, false);
+});
+
+test("groq and ollama lack structured output and reasoning", () => {
+  assert.equal(PROVIDER_CAPABILITY_MATRIX.groq.structuredOutput, false);
+  assert.equal(PROVIDER_CAPABILITY_MATRIX.groq.reasoning, false);
+  assert.equal(PROVIDER_CAPABILITY_MATRIX.ollama.structuredOutput, false);
+  assert.equal(PROVIDER_CAPABILITY_MATRIX.ollama.reasoning, false);
+});

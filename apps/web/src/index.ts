@@ -1,5 +1,5 @@
 import type { BootstrapResponse } from "@prmpt/contracts";
-import { SupabasePaymentEventRepository } from "@prmpt/data-access";
+import { InMemoryTemplateRepository, SupabasePaymentEventRepository } from "@prmpt/data-access";
 import { loadWebEnv } from "./env.js";
 import { createEntitlementReadApi } from "./api/entitlement-read.js";
 import {
@@ -9,6 +9,13 @@ import {
 import { createPolarCheckoutApi } from "./api/payment-checkout-polar.js";
 import { createPolarWebhookApi } from "./api/payment-webhook-polar.js";
 import { createUsageConsumeApi } from "./api/usage-consume.js";
+import {
+  createTemplateCreateApi,
+  createTemplateGetApi,
+  createTemplateListApi,
+  createTemplateUpdateApi,
+  createTemplateDeleteApi
+} from "./api/template-crud.js";
 import { createAuthPortalRouter } from "./auth/index.js";
 import { createPolarEntitlementProvider } from "./entitlement/provider.js";
 
@@ -145,3 +152,41 @@ export const handleEntitlementRead = (() => {
     entitlementProvider
   });
 })();
+
+// --- Template CRUD (ST-06-03) ---
+
+const templateRepository = new InMemoryTemplateRepository();
+
+function createEntitlementChecker() {
+  const env = loadWebEnv();
+  const userRepository = createSupabaseUserRepository({
+    supabaseUrl: env.supabaseUrl,
+    supabaseServiceRoleKey: env.supabaseServiceRoleKey
+  });
+  return async (userId: string) => {
+    const state = await userRepository.upsertUser(userId);
+    return { isPremium: state.isPremium };
+  };
+}
+
+export const handleTemplateCreate = createTemplateCreateApi({
+  templateRepository,
+  getEntitlement: createEntitlementChecker()
+});
+
+export const handleTemplateGet = createTemplateGetApi({
+  templateRepository,
+  getEntitlement: createEntitlementChecker()
+});
+
+export const handleTemplateList = createTemplateListApi({
+  templateRepository
+});
+
+export const handleTemplateUpdate = createTemplateUpdateApi({
+  templateRepository
+});
+
+export const handleTemplateDelete = createTemplateDeleteApi({
+  templateRepository
+});

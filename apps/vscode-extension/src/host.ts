@@ -3,6 +3,8 @@ import type { AuthMode } from "./auth/index.js";
 export const AUTH_SIGN_IN_COMMAND = "prmpt.auth.signIn";
 export const AUTH_SIGN_UP_COMMAND = "prmpt.auth.signUp";
 export const AUTH_SIGN_OUT_COMMAND = "prmpt.auth.signOut";
+export const ENTITLEMENT_UPGRADE_COMMAND = "prmpt.entitlement.upgrade";
+export const ENTITLEMENT_REFRESH_COMMAND = "prmpt.entitlement.refresh";
 
 export interface DisposableLike {
   dispose(): void;
@@ -30,6 +32,7 @@ export interface ExtensionHostApi {
   registerUriHandler(handler: UriHandlerLike): DisposableLike;
   openExternal(url: string): Promise<boolean>;
   showInformationMessage(message: string): void;
+  showWarningMessage(message: string, ...actions: string[]): Promise<string | undefined>;
   showErrorMessage(message: string): void;
 }
 
@@ -50,6 +53,9 @@ export function createNoopHostApi(): ExtensionHostApi {
     },
     showInformationMessage() {
       return;
+    },
+    async showWarningMessage() {
+      return undefined;
     },
     showErrorMessage() {
       return;

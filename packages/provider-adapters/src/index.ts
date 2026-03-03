@@ -4,6 +4,9 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
 const DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+const DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1";
+const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
 
 type FetchLike = typeof fetch;
 
@@ -271,6 +274,62 @@ export interface AnthropicAdapterConfig extends BaseAdapterConfig {
 
 export interface GeminiAdapterConfig extends BaseAdapterConfig {
   baseUrl?: string;
+}
+
+export interface OpenRouterAdapterConfig extends BaseAdapterConfig {
+  baseUrl?: string;
+  siteUrl?: string;
+  siteName?: string;
+}
+
+export interface GroqAdapterConfig extends BaseAdapterConfig {
+  baseUrl?: string;
+}
+
+export interface OllamaAdapterConfig {
+  model: string;
+  baseUrl?: string;
+  timeoutMs?: number;
+  fetchFn?: FetchLike;
+}
+
+export const PROVIDER_CAPABILITY_MATRIX: Readonly<Record<ProviderId, ProviderCapabilities>> = {
+  openai: { streaming: true, structuredOutput: true, reasoning: true, penalties: true, routing: false, tokenEstimation: true },
+  anthropic: { streaming: true, structuredOutput: false, reasoning: true, penalties: false, routing: false, tokenEstimation: true },
+  gemini: { streaming: true, structuredOutput: true, reasoning: true, penalties: false, routing: false, tokenEstimation: true },
+  openrouter: { streaming: true, structuredOutput: true, reasoning: true, penalties: false, routing: true, tokenEstimation: true },
+  groq: { streaming: true, structuredOutput: false, reasoning: false, penalties: false, routing: false, tokenEstimation: true },
+  ollama: { streaming: true, structuredOutput: false, reasoning: false, penalties: false, routing: false, tokenEstimation: true }
+};
+
+export interface PreflightResult {
+  valid: boolean;
+  warnings: string[];
+  adjustedRequest: ProviderOptimizeRequest;
+}
+
+export function preflightValidate(
+  request: ProviderOptimizeRequest,
+  capabilities: ProviderCapabilities
+): PreflightResult {
+  const warnings: string[] = [];
+  const adjusted: ProviderOptimizeRequest = { ...request };
+
+  if (request.outputFormat === "json" && !capabilities.structuredOutput) {
+    adjusted.outputFormat = "markdown";
+    warnings.push("Structured JSON output is not supported by this provider. Falling back to markdown.");
+  }
+
+  if (request.stream && !capabilities.streaming) {
+    adjusted.stream = false;
+    warnings.push("Streaming is not supported by this provider. Using non-streaming mode.");
+  }
+
+  return { valid: true, warnings, adjustedRequest: adjusted };
+}
+
+export function getProviderCapabilities(providerId: ProviderId): ProviderCapabilities {
+  return PROVIDER_CAPABILITY_MATRIX[providerId];
 }
 
 export function createOpenAIAdapter(config: OpenAIAdapterConfig): ProviderAdapter {
@@ -751,6 +810,316 @@ export function createNoopAdapter(providerId: ProviderId): ProviderAdapter {
         estimatedTokens: Math.max(1, request.prompt.trim().length),
         correlationId: createCorrelationId()
       };
+    }
+  };
+}
+
+export function createOpenRouterAdapter(config: OpenRouterAdapterConfig): ProviderAdapter {
+  const providerId: ProviderId = "openrouter";
+  const apiKey = requireNonEmptyString(config.apiKey, providerId, "OpenRouter apiKey is required.");
+  const defaultModel = requireNonEmptyString(config.model, providerId, "OpenRouter model is required.");
+  const baseUrl = sanitizeBaseUrl(config.baseUrl ?? DEFAULT_OPENROUTER_BASE_URL);
+  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const fetchFn = config.fetchFn ?? fetch;
+  const siteUrl = config.siteUrl;
+  const siteName = config.siteName;
+
+  function buildHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    };
+    if (siteUrl) headers["HTTP-Referer"] = siteUrl;
+    if (siteName) headers["X-Title"] = siteName;
+    return headers;
+  }
+
+  async function healthCheck(): Promise<HealthCheckResult> {
+    try {
+      const correlationId = createCorrelationId();
+      const response = await runRequest({
+        providerId,
+        url: `${baseUrl}/models`,
+        method: "GET",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        timeoutMs,
+        fetchFn,
+        correlationId
+      });
+      return { ok: response.status >= 200 && response.status < 300, correlationId };
+    } catch (error) {
+      const normalized = normalizeProviderError(error, providerId);
+      return { ok: false, detail: normalized.message, correlationId: normalized.correlationId };
+    }
+  }
+
+  async function optimize(request: ProviderOptimizeRequest): Promise<ProviderOptimizeResponse> {
+    if (request.stream) {
+      return aggregateStreamedResponse(providerId, streamOptimize(request), request.prompt);
+    }
+
+    validateCommonRequest(request, providerId);
+    validateOptionalRange(request.temperature, 0, 2, providerId, "Temperature must be between 0 and 2.");
+
+    const correlationId = createCorrelationId();
+    const body = buildOpenAIRequestBody(request, defaultModel, false);
+    const response = await runRequest({
+      providerId,
+      url: `${baseUrl}/chat/completions`,
+      method: "POST",
+      headers: buildHeaders(),
+      body,
+      timeoutMs,
+      fetchFn,
+      correlationId
+    });
+    const payload = await parseJsonResponse(response, providerId, correlationId);
+    const optimizedPrompt = readOpenAIText(payload, providerId, correlationId);
+    const usage = readOpenAIUsage(payload, request.prompt, optimizedPrompt);
+    return { optimizedPrompt, usage, correlationId };
+  }
+
+  async function* streamOptimize(
+    request: ProviderOptimizeRequest
+  ): AsyncGenerator<ProviderStreamChunk, void, undefined> {
+    validateCommonRequest(request, providerId);
+    validateOptionalRange(request.temperature, 0, 2, providerId, "Temperature must be between 0 and 2.");
+
+    const correlationId = createCorrelationId();
+    const body = buildOpenAIRequestBody(request, defaultModel, true);
+    const response = await runRequest({
+      providerId,
+      url: `${baseUrl}/chat/completions`,
+      method: "POST",
+      headers: buildHeaders(),
+      body,
+      timeoutMs,
+      fetchFn,
+      correlationId
+    });
+
+    const stream = readSseStream(response, providerId, correlationId);
+    for await (const payloadText of stream) {
+      const payload = parseJsonChunk(payloadText, providerId, correlationId);
+      const delta = readOpenAIDelta(payload);
+      if (delta.length > 0) {
+        yield { delta, done: false, correlationId };
+      }
+    }
+    yield { delta: "", done: true, correlationId };
+  }
+
+  return {
+    providerId,
+    capabilities: PROVIDER_CAPABILITY_MATRIX.openrouter,
+    healthCheck,
+    optimize,
+    streamOptimize,
+    async estimateTokens(request) {
+      return { estimatedTokens: estimateTokens(request.prompt), correlationId: createCorrelationId() };
+    }
+  };
+}
+
+export function createGroqAdapter(config: GroqAdapterConfig): ProviderAdapter {
+  const providerId: ProviderId = "groq";
+  const apiKey = requireNonEmptyString(config.apiKey, providerId, "Groq apiKey is required.");
+  const defaultModel = requireNonEmptyString(config.model, providerId, "Groq model is required.");
+  const baseUrl = sanitizeBaseUrl(config.baseUrl ?? DEFAULT_GROQ_BASE_URL);
+  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const fetchFn = config.fetchFn ?? fetch;
+
+  async function healthCheck(): Promise<HealthCheckResult> {
+    try {
+      const correlationId = createCorrelationId();
+      const response = await runRequest({
+        providerId,
+        url: `${baseUrl}/models`,
+        method: "GET",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        timeoutMs,
+        fetchFn,
+        correlationId
+      });
+      return { ok: response.status >= 200 && response.status < 300, correlationId };
+    } catch (error) {
+      const normalized = normalizeProviderError(error, providerId);
+      return { ok: false, detail: normalized.message, correlationId: normalized.correlationId };
+    }
+  }
+
+  async function optimize(request: ProviderOptimizeRequest): Promise<ProviderOptimizeResponse> {
+    if (request.stream) {
+      return aggregateStreamedResponse(providerId, streamOptimize(request), request.prompt);
+    }
+
+    validateCommonRequest(request, providerId);
+    validateOptionalRange(request.temperature, 0, 2, providerId, "Groq temperature must be between 0 and 2.");
+
+    const correlationId = createCorrelationId();
+    const body = buildOpenAIRequestBody(request, defaultModel, false);
+    delete body.response_format;
+
+    const response = await runRequest({
+      providerId,
+      url: `${baseUrl}/chat/completions`,
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body,
+      timeoutMs,
+      fetchFn,
+      correlationId
+    });
+    const payload = await parseJsonResponse(response, providerId, correlationId);
+    const optimizedPrompt = readOpenAIText(payload, providerId, correlationId);
+    const usage = readOpenAIUsage(payload, request.prompt, optimizedPrompt);
+    return { optimizedPrompt, usage, correlationId };
+  }
+
+  async function* streamOptimize(
+    request: ProviderOptimizeRequest
+  ): AsyncGenerator<ProviderStreamChunk, void, undefined> {
+    validateCommonRequest(request, providerId);
+    validateOptionalRange(request.temperature, 0, 2, providerId, "Groq temperature must be between 0 and 2.");
+
+    const correlationId = createCorrelationId();
+    const body = buildOpenAIRequestBody(request, defaultModel, true);
+    delete body.response_format;
+
+    const response = await runRequest({
+      providerId,
+      url: `${baseUrl}/chat/completions`,
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body,
+      timeoutMs,
+      fetchFn,
+      correlationId
+    });
+
+    const stream = readSseStream(response, providerId, correlationId);
+    for await (const payloadText of stream) {
+      const payload = parseJsonChunk(payloadText, providerId, correlationId);
+      const delta = readOpenAIDelta(payload);
+      if (delta.length > 0) {
+        yield { delta, done: false, correlationId };
+      }
+    }
+    yield { delta: "", done: true, correlationId };
+  }
+
+  return {
+    providerId,
+    capabilities: PROVIDER_CAPABILITY_MATRIX.groq,
+    healthCheck,
+    optimize,
+    streamOptimize,
+    async estimateTokens(request) {
+      return { estimatedTokens: estimateTokens(request.prompt), correlationId: createCorrelationId() };
+    }
+  };
+}
+
+export function createOllamaAdapter(config: OllamaAdapterConfig): ProviderAdapter {
+  const providerId: ProviderId = "ollama";
+  const defaultModel = requireNonEmptyString(config.model, providerId, "Ollama model is required.");
+  const baseUrl = sanitizeBaseUrl(config.baseUrl ?? DEFAULT_OLLAMA_BASE_URL);
+  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const fetchFn = config.fetchFn ?? fetch;
+
+  async function healthCheck(): Promise<HealthCheckResult> {
+    try {
+      const correlationId = createCorrelationId();
+      const response = await runRequest({
+        providerId,
+        url: `${baseUrl}/api/tags`,
+        method: "GET",
+        headers: {},
+        timeoutMs,
+        fetchFn,
+        correlationId
+      });
+      return { ok: response.status >= 200 && response.status < 300, correlationId };
+    } catch (error) {
+      const normalized = normalizeProviderError(error, providerId);
+      return { ok: false, detail: normalized.message, correlationId: normalized.correlationId };
+    }
+  }
+
+  async function optimize(request: ProviderOptimizeRequest): Promise<ProviderOptimizeResponse> {
+    if (request.stream) {
+      return aggregateStreamedResponse(providerId, streamOptimize(request), request.prompt);
+    }
+
+    validateCommonRequest(request, providerId);
+    validateModelFamily(request, providerId, "local");
+
+    const correlationId = createCorrelationId();
+    const body = buildOpenAIRequestBody(request, defaultModel, false);
+    delete body.response_format;
+
+    const response = await runRequest({
+      providerId,
+      url: `${baseUrl}/v1/chat/completions`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      timeoutMs,
+      fetchFn,
+      correlationId
+    });
+    const payload = await parseJsonResponse(response, providerId, correlationId);
+    const optimizedPrompt = readOpenAIText(payload, providerId, correlationId);
+    const usage = readOpenAIUsage(payload, request.prompt, optimizedPrompt);
+    return { optimizedPrompt, usage, correlationId };
+  }
+
+  async function* streamOptimize(
+    request: ProviderOptimizeRequest
+  ): AsyncGenerator<ProviderStreamChunk, void, undefined> {
+    validateCommonRequest(request, providerId);
+    validateModelFamily(request, providerId, "local");
+
+    const correlationId = createCorrelationId();
+    const body = buildOpenAIRequestBody(request, defaultModel, true);
+    delete body.response_format;
+
+    const response = await runRequest({
+      providerId,
+      url: `${baseUrl}/v1/chat/completions`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      timeoutMs,
+      fetchFn,
+      correlationId
+    });
+
+    const stream = readSseStream(response, providerId, correlationId);
+    for await (const payloadText of stream) {
+      const payload = parseJsonChunk(payloadText, providerId, correlationId);
+      const delta = readOpenAIDelta(payload);
+      if (delta.length > 0) {
+        yield { delta, done: false, correlationId };
+      }
+    }
+    yield { delta: "", done: true, correlationId };
+  }
+
+  return {
+    providerId,
+    capabilities: PROVIDER_CAPABILITY_MATRIX.ollama,
+    healthCheck,
+    optimize,
+    streamOptimize,
+    async estimateTokens(request) {
+      return { estimatedTokens: estimateTokens(request.prompt), correlationId: createCorrelationId() };
     }
   };
 }

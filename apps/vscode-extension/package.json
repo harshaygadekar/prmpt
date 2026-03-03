@@ -12,6 +12,7 @@
   "dependencies": {
     "@prmpt/contracts": "workspace:*",
     "@prmpt/core-engine": "workspace:*",
-    "@prmpt/shared-utils": "workspace:*"
+    "@prmpt/shared-utils": "workspace:*",
+    "zod": "^4.3.6"
   }
 }
