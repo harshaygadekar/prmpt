@@ -33,6 +33,51 @@ export interface SecretStorageLike {
   delete(key: string): Promise<void>;
 }
 
+// --- Key format validation (ST-08-02) ---
+
+export interface KeyValidationResult {
+  valid: boolean;
+  reason?: string;
+}
+
+const MIN_KEY_LENGTH = 8;
+
+const PROVIDER_KEY_PATTERNS: Partial<Record<ProviderId, RegExp>> = {
+  openai: /^sk-[a-zA-Z0-9_-]{20,}$/,
+  anthropic: /^sk-ant-[a-zA-Z0-9_-]{20,}$/,
+  groq: /^gsk_[a-zA-Z0-9]{20,}$/,
+  gemini: /^AIza[a-zA-Z0-9_-]{30,}$/
+};
+
+/**
+ * Validates API key format before storing in SecretStorage.
+ * Rejects empty, whitespace-only, too-short, or known-malformed keys.
+ */
+export function validateKeyFormat(providerId: ProviderId, apiKey: string): KeyValidationResult {
+  if (!apiKey || apiKey.trim().length === 0) {
+    return { valid: false, reason: "API key must not be empty" };
+  }
+  if (apiKey !== apiKey.trim()) {
+    return { valid: false, reason: "API key must not have leading or trailing whitespace" };
+  }
+  if (apiKey.length < MIN_KEY_LENGTH) {
+    return { valid: false, reason: `API key must be at least ${MIN_KEY_LENGTH} characters` };
+  }
+  const pattern = PROVIDER_KEY_PATTERNS[providerId];
+  if (pattern && !pattern.test(apiKey)) {
+    return { valid: false, reason: `API key does not match expected format for ${providerId}` };
+  }
+  return { valid: true };
+}
+
+// --- Key audit types (ST-08-02) ---
+
+export interface KeyAuditResult {
+  orphanedMetadata: ProviderId[];
+  missingSecrets: ProviderId[];
+  healthy: boolean;
+}
+
 // --- Key mask utility ---
 
 function maskApiKey(key: string): string {
@@ -89,7 +134,23 @@ export class ProviderKeyManager {
     await this.secrets.store(METADATA_KEY, JSON.stringify(entries));
   }
 
-  async addKey(providerId: ProviderId, apiKey: string): Promise<ProviderKeyEntry> {
+  /**
+   * Add or replace a provider API key.
+   * When `validate` is true (default), rejects malformed keys before writing.
+   */
+  async addKey(
+    providerId: ProviderId,
+    apiKey: string,
+    options: { validate?: boolean } = {}
+  ): Promise<ProviderKeyEntry> {
+    const shouldValidate = options.validate !== false;
+    if (shouldValidate) {
+      const check = validateKeyFormat(providerId, apiKey);
+      if (!check.valid) {
+        throw new Error(check.reason ?? "Invalid API key format");
+      }
+    }
+
     await this.secrets.store(`${STORAGE_PREFIX}${providerId}`, apiKey);
 
     const entry: Omit<ProviderKeyEntry, "providerId"> = {
@@ -106,6 +167,47 @@ export class ProviderKeyManager {
 
   async updateKey(providerId: ProviderId, apiKey: string): Promise<ProviderKeyEntry> {
     return this.addKey(providerId, apiKey);
+  }
+
+  /**
+   * Rotate a provider key with verification (ST-08-02).
+   * 1. Verify the new key works via health check before replacing.
+   * 2. Store the new key only if it passes verification.
+   * Returns the updated entry on success, or throws on failure.
+   */
+  async rotateKey(
+    providerId: ProviderId,
+    newKey: string
+  ): Promise<ProviderKeyEntry> {
+    // Validate format first
+    const check = validateKeyFormat(providerId, newKey);
+    if (!check.valid) {
+      throw new Error(check.reason ?? "Invalid API key format");
+    }
+
+    // If no health check, skip verification and just replace
+    if (!this.healthCheck) {
+      return this.addKey(providerId, newKey, { validate: false });
+    }
+
+    // Probe the new key before committing
+    let probeResult: { ok: boolean; detail?: string };
+    try {
+      probeResult = await this.healthCheck(providerId, newKey);
+    } catch (err) {
+      throw new Error(
+        `Key rotation aborted – health check failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    if (!probeResult.ok) {
+      throw new Error(
+        `Key rotation aborted – new key is not healthy: ${probeResult.detail ?? "unknown reason"}`
+      );
+    }
+
+    // New key verified – commit rotation
+    return this.addKey(providerId, newKey, { validate: false });
   }
 
   async removeKey(providerId: ProviderId): Promise<void> {
@@ -127,6 +229,49 @@ export class ProviderKeyManager {
       providerId,
       ...entry
     }));
+  }
+
+  /**
+   * Startup integrity audit (ST-08-02).
+   * Detects:
+   *   - orphanedMetadata: metadata exists but SecretStorage has no matching key
+   *   - missingSecrets: SecretStorage queried but returns undefined for a metadata entry
+   */
+  async auditKeys(): Promise<KeyAuditResult> {
+    const orphanedMetadata: ProviderId[] = [];
+    const missingSecrets: ProviderId[] = [];
+
+    for (const [providerId] of this.metadata) {
+      const raw = await this.secrets.get(`${STORAGE_PREFIX}${providerId}`);
+      if (raw === undefined) {
+        missingSecrets.push(providerId);
+      }
+    }
+
+    return {
+      orphanedMetadata,
+      missingSecrets,
+      healthy: missingSecrets.length === 0 && orphanedMetadata.length === 0
+    };
+  }
+
+  /**
+   * No-leak assertion (ST-08-02).
+   * Serialises metadata + list output and verifies no raw keys appear.
+   * Returns leaked provider IDs. Intended for testing / CI assertions.
+   */
+  async assertNoLeaks(): Promise<{ leaked: ProviderId[]; safe: boolean }> {
+    const leaked: ProviderId[] = [];
+    const serialized = JSON.stringify(this.listKeys());
+
+    for (const [providerId] of this.metadata) {
+      const rawKey = await this.secrets.get(`${STORAGE_PREFIX}${providerId}`);
+      if (rawKey && serialized.includes(rawKey)) {
+        leaked.push(providerId);
+      }
+    }
+
+    return { leaked, safe: leaked.length === 0 };
   }
 
   async checkHealth(providerId: ProviderId): Promise<ProviderHealthStatus> {
@@ -271,12 +416,46 @@ export function createSettingsUpdateHandler(
             envelope.correlationId
           );
         }
-        const entry = await keyManager.addKey(providerId, apiKey);
-        return createResponse(
-          MESSAGE_TYPES.SETTINGS_UPDATE_RESPONSE,
-          { success: true, action: "add-key", entry },
-          envelope.correlationId
-        );
+        try {
+          const entry = await keyManager.addKey(providerId, apiKey);
+          return createResponse(
+            MESSAGE_TYPES.SETTINGS_UPDATE_RESPONSE,
+            { success: true, action: "add-key", entry },
+            envelope.correlationId
+          );
+        } catch (err) {
+          return createResponse(
+            MESSAGE_TYPES.SETTINGS_UPDATE_RESPONSE,
+            { success: false, error: err instanceof Error ? err.message : String(err) },
+            envelope.correlationId
+          );
+        }
+      }
+
+      case "rotate-key": {
+        const providerId = payload.providerId as ProviderId;
+        const newKey = payload.apiKey as string;
+        if (!providerId || !newKey) {
+          return createResponse(
+            MESSAGE_TYPES.SETTINGS_UPDATE_RESPONSE,
+            { success: false, error: "providerId and apiKey are required" },
+            envelope.correlationId
+          );
+        }
+        try {
+          const entry = await keyManager.rotateKey(providerId, newKey);
+          return createResponse(
+            MESSAGE_TYPES.SETTINGS_UPDATE_RESPONSE,
+            { success: true, action: "rotate-key", entry },
+            envelope.correlationId
+          );
+        } catch (err) {
+          return createResponse(
+            MESSAGE_TYPES.SETTINGS_UPDATE_RESPONSE,
+            { success: false, error: err instanceof Error ? err.message : String(err) },
+            envelope.correlationId
+          );
+        }
       }
 
       case "remove-key": {

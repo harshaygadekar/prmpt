@@ -266,3 +266,46 @@ export const templateListResponseSchema = z.object({
   total: z.number().int().nonnegative()
 });
 export type TemplateListResponse = z.infer<typeof templateListResponseSchema>;
+
+// --- Prompt History contracts (ST-07-05) ---
+
+export const promptHistoryEntrySchema = z.object({
+  id: z.string().min(1),
+  userId: z.string().min(1),
+  inputPrompt: z.string().min(1),
+  optimizedPrompt: z.string().min(1),
+  modelFamily: modelFamilySchema,
+  outputFormat: outputFormatSchema,
+  provider: z.string().min(1),
+  score: z.number().int().min(0).max(100).optional(),
+  templateId: z.string().min(1).optional(),
+  createdAt: z.string().min(1),
+  metadata: z.record(z.string(), z.unknown()).optional()
+});
+export type PromptHistoryEntry = z.infer<typeof promptHistoryEntrySchema>;
+
+export const promptHistoryListRequestSchema = z.object({
+  userId: z.string().min(1),
+  limit: z.number().int().positive().max(100).optional(),
+  offset: z.number().int().nonnegative().optional(),
+  search: z.string().optional()
+});
+export type PromptHistoryListRequest = z.infer<typeof promptHistoryListRequestSchema>;
+
+export const promptHistoryListResponseSchema = z.object({
+  entries: z.array(promptHistoryEntrySchema),
+  total: z.number().int().nonnegative()
+});
+export type PromptHistoryListResponse = z.infer<typeof promptHistoryListResponseSchema>;
+
+export const promptHistoryGetRequestSchema = z.object({
+  userId: z.string().min(1),
+  entryId: z.string().min(1)
+});
+export type PromptHistoryGetRequest = z.infer<typeof promptHistoryGetRequestSchema>;
+
+export const promptHistoryDeleteRequestSchema = z.object({
+  userId: z.string().min(1),
+  entryId: z.string().min(1)
+});
+export type PromptHistoryDeleteRequest = z.infer<typeof promptHistoryDeleteRequestSchema>;

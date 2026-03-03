@@ -827,3 +827,122 @@ export class InMemoryTemplateRepository implements TemplateRepository {
     ).length;
   }
 }
+
+// --- Prompt History repository (ST-07-05) ---
+
+export interface PromptHistoryRecord {
+  id: string;
+  userId: string;
+  inputPrompt: string;
+  optimizedPrompt: string;
+  modelFamily: string;
+  outputFormat: string;
+  provider: string;
+  score: number | undefined;
+  templateId: string | undefined;
+  createdAt: string;
+  metadata: Record<string, unknown> | undefined;
+}
+
+export interface PromptHistoryFilter {
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface PromptHistoryRepository {
+  add(record: PromptHistoryRecord): Promise<PromptHistoryRecord>;
+  getById(userId: string, entryId: string): Promise<PromptHistoryRecord | undefined>;
+  list(userId: string, filter?: PromptHistoryFilter): Promise<{ entries: PromptHistoryRecord[]; total: number }>;
+  remove(userId: string, entryId: string): Promise<boolean>;
+  countByUser(userId: string): Promise<number>;
+  clear(userId: string): Promise<number>;
+}
+
+export const MAX_HISTORY_ENTRIES = 500;
+
+export class InMemoryPromptHistoryRepository implements PromptHistoryRepository {
+  private readonly entries = new Map<string, PromptHistoryRecord>();
+  private readonly now: () => Date;
+  private idCounter = 0;
+
+  constructor(now: () => Date = () => new Date()) {
+    this.now = now;
+  }
+
+  async add(record: PromptHistoryRecord): Promise<PromptHistoryRecord> {
+    const entry: PromptHistoryRecord = {
+      ...record,
+      id: record.id || this.generateId(),
+      createdAt: record.createdAt || this.now().toISOString()
+    };
+
+    // Enforce max entries per user
+    const userEntries = [...this.entries.values()]
+      .filter((e) => e.userId === entry.userId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+    if (userEntries.length >= MAX_HISTORY_ENTRIES) {
+      const oldest = userEntries[0];
+      if (oldest) this.entries.delete(oldest.id);
+    }
+
+    this.entries.set(entry.id, entry);
+    return { ...entry };
+  }
+
+  async getById(userId: string, entryId: string): Promise<PromptHistoryRecord | undefined> {
+    const entry = this.entries.get(entryId);
+    if (!entry || entry.userId !== userId) return undefined;
+    return { ...entry };
+  }
+
+  async list(
+    userId: string,
+    filter?: PromptHistoryFilter
+  ): Promise<{ entries: PromptHistoryRecord[]; total: number }> {
+    let results = [...this.entries.values()]
+      .filter((e) => e.userId === userId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+    if (filter?.search) {
+      const q = filter.search.toLowerCase();
+      results = results.filter(
+        (e) =>
+          e.inputPrompt.toLowerCase().includes(q) ||
+          e.optimizedPrompt.toLowerCase().includes(q) ||
+          e.provider.toLowerCase().includes(q)
+      );
+    }
+
+    const total = results.length;
+    const offset = filter?.offset ?? 0;
+    const limit = filter?.limit ?? 50;
+    results = results.slice(offset, offset + limit);
+
+    return { entries: results.map((e) => ({ ...e })), total };
+  }
+
+  async remove(userId: string, entryId: string): Promise<boolean> {
+    const entry = this.entries.get(entryId);
+    if (!entry || entry.userId !== userId) return false;
+    return this.entries.delete(entryId);
+  }
+
+  async countByUser(userId: string): Promise<number> {
+    return [...this.entries.values()].filter((e) => e.userId === userId).length;
+  }
+
+  async clear(userId: string): Promise<number> {
+    const toDelete = [...this.entries.values()].filter((e) => e.userId === userId);
+    for (const entry of toDelete) {
+      this.entries.delete(entry.id);
+    }
+    return toDelete.length;
+  }
+
+  private generateId(): string {
+    this.idCounter++;
+    return `hist-${Date.now().toString(36)}-${this.idCounter}`;
+  }
+}
