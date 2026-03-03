@@ -1,0 +1,31 @@
+{
+  "name": "prmpt",
+  "private": true,
+  "version": "0.0.0",
+  "packageManager": "pnpm@10.15.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": "22.21.1",
+    "pnpm": "10.15.0"
+  },
+  "scripts": {
+    "ci": "pnpm run build && pnpm run typecheck && pnpm run lint && pnpm run test",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint && node scripts/check-dependency-direction.mjs",
+    "test": "turbo run test",
+    "prepush": "bash scripts/pre-push-check.sh",
+    "setup:hooks": "bash scripts/install-git-hooks.sh",
+    "changeset": "changeset",
+    "check:deps": "node scripts/check-dependency-direction.mjs",
+    "check:gate-b": "bash scripts/check-gate-b.sh"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.29.7",
+    "turbo": "^2.5.6",
+    "typescript": "^5.9.2"
+  }
+}

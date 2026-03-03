@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noImplicitAny": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "baseUrl": ".",
+    "paths": {
+      "@prmpt/contracts": ["packages/contracts/src/index.ts"],
+      "@prmpt/core-engine": ["packages/core-engine/src/index.ts"],
+      "@prmpt/data-access": ["packages/data-access/src/index.ts"],
+      "@prmpt/model-rules": ["packages/model-rules/src/index.ts"],
+      "@prmpt/provider-adapters": ["packages/provider-adapters/src/index.ts"],
+      "@prmpt/shared-utils": ["packages/shared-utils/src/index.ts"],
+      "@prmpt/template-schema": ["packages/template-schema/src/index.ts"],
+      "@prmpt/telemetry": ["packages/telemetry/src/index.ts"]
+    }
+  }
+}

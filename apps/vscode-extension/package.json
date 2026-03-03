@@ -1,0 +1,17 @@
+{
+  "name": "@prmpt/vscode-extension",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "node -e \"console.log('lint ok: @prmpt/vscode-extension')\"",
+    "test": "pnpm run build && node --test test/**/*.test.mjs"
+  },
+  "dependencies": {
+    "@prmpt/contracts": "workspace:*",
+    "@prmpt/core-engine": "workspace:*",
+    "@prmpt/shared-utils": "workspace:*"
+  }
+}

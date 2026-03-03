@@ -1,0 +1,15 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared-utils" },
+    { "path": "packages/model-rules" },
+    { "path": "packages/contracts" },
+    { "path": "packages/provider-adapters" },
+    { "path": "packages/template-schema" },
+    { "path": "packages/data-access" },
+    { "path": "packages/telemetry" },
+    { "path": "packages/core-engine" },
+    { "path": "apps/vscode-extension" },
+    { "path": "apps/web" }
+  ]
+}

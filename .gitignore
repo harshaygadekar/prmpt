@@ -1,0 +1,23 @@
+# Local env and secrets
+.env
+.env.*
+!.env.example
+wiki/
+*.pem
+*.key
+
+# Node / build artifacts
+node_modules/
+.pnpm-store/
+.turbo/
+dist/
+build/
+coverage/
+
+# VS Code extension artifacts
+.vscode-test/
+*.vsix
+
+# Logs and OS files
+*.log
+.DS_Store
