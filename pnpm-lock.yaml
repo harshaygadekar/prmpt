@@ -26,6 +26,9 @@ importers:
       '@prmpt/core-engine':
         specifier: workspace:*
         version: link:../../packages/core-engine
+      '@prmpt/model-rules':
+        specifier: workspace:*
+        version: link:../../packages/model-rules
       '@prmpt/shared-utils':
         specifier: workspace:*
         version: link:../../packages/shared-utils

@@ -25,6 +25,9 @@ export const MESSAGE_TYPES = {
   AUTH_STATUS_REQUEST: "auth.status.request",
   SETTINGS_GET_REQUEST: "settings.get.request",
   SETTINGS_UPDATE_REQUEST: "settings.update.request",
+  TECHNIQUE_LIST_REQUEST: "technique.list.request",
+  TECHNIQUE_VALIDATE_REQUEST: "technique.validate.request",
+  CONTEXT_COLLECT_REQUEST: "context.collect.request",
 
   // Host -> Webview responses
   OPTIMIZE_RESPONSE: "optimize.response",
@@ -34,6 +37,9 @@ export const MESSAGE_TYPES = {
   AUTH_STATUS_RESPONSE: "auth.status.response",
   SETTINGS_GET_RESPONSE: "settings.get.response",
   SETTINGS_UPDATE_RESPONSE: "settings.update.response",
+  TECHNIQUE_LIST_RESPONSE: "technique.list.response",
+  TECHNIQUE_VALIDATE_RESPONSE: "technique.validate.response",
+  CONTEXT_COLLECT_RESPONSE: "context.collect.response",
 
   // Host -> Webview events (push)
   AUTH_STATE_CHANGED: "auth.stateChanged",

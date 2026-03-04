@@ -1,0 +1,204 @@
+# Publish workflow for prmpt VS Code extension
+# Triggered by semver release tags (v*.*.*)
+# Produces signed VSIX artifact and publishes to VS Code Marketplace
+
+name: Publish Extension
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION_FILE: .nvmrc
+  PNPM_VERSION: "10.15.0"
+  EXTENSION_DIR: apps/vscode-extension
+
+jobs:
+  # ───────────────────────────────────────────
+  # Step 1: Build, validate metadata, package VSIX
+  # ───────────────────────────────────────────
+  package:
+    name: Package VSIX
+    runs-on: ubuntu-latest
+    outputs:
+      vsix-name: ${{ steps.package.outputs.vsix-name }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ${{ env.NODE_VERSION_FILE }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: ${TAG}"
+
+      - name: Stamp version in extension package.json
+        run: |
+          cd ${{ env.EXTENSION_DIR }}
+          node -e "
+            const pkg = JSON.parse(require('fs').readFileSync('package.json','utf8'));
+            pkg.version = '${{ steps.version.outputs.version }}';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Build all packages
+        run: pnpm run build
+
+      - name: Run tests
+        run: pnpm run test
+
+      - name: Validate extension metadata
+        run: |
+          cd ${{ env.EXTENSION_DIR }}
+          node -e "
+            const pkg = JSON.parse(require('fs').readFileSync('package.json','utf8'));
+            const required = ['name', 'version', 'type'];
+            const missing = required.filter(k => !pkg[k]);
+            if (missing.length) {
+              console.error('Missing required fields:', missing.join(', '));
+              process.exit(1);
+            }
+            if (!/^\d+\.\d+\.\d+$/.test(pkg.version)) {
+              console.error('Invalid version format:', pkg.version);
+              process.exit(1);
+            }
+            console.log('Extension metadata valid');
+            console.log('  name:', pkg.name);
+            console.log('  version:', pkg.version);
+          "
+
+      - name: Install vsce
+        run: pnpm add -g @vscode/vsce
+
+      - name: Package VSIX
+        id: package
+        run: |
+          cd ${{ env.EXTENSION_DIR }}
+          VSIX_NAME="prmpt-${{ steps.version.outputs.version }}.vsix"
+          vsce package --no-dependencies -o "../../${VSIX_NAME}"
+          echo "vsix-name=${VSIX_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Packaged: ${VSIX_NAME}"
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: ${{ steps.package.outputs.vsix-name }}
+          retention-days: 90
+
+  # ───────────────────────────────────────────
+  # Step 2: Publish to VS Code Marketplace
+  # ───────────────────────────────────────────
+  publish-marketplace:
+    name: Publish to Marketplace
+    needs: package
+    runs-on: ubuntu-latest
+    environment: marketplace
+    steps:
+      - name: Download VSIX
+        uses: actions/download-artifact@v4
+        with:
+          name: vsix
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ${{ env.NODE_VERSION_FILE }}
+
+      - name: Install vsce
+        run: pnpm add -g @vscode/vsce
+
+      - name: Publish to VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          vsce publish --packagePath "${{ needs.package.outputs.vsix-name }}"
+          echo "Published ${{ needs.package.outputs.vsix-name }} to Marketplace"
+
+  # ───────────────────────────────────────────
+  # Step 3 (optional): Publish to Open VSX
+  # ───────────────────────────────────────────
+  publish-openvsx:
+    name: Publish to Open VSX
+    needs: package
+    runs-on: ubuntu-latest
+    environment: openvsx
+    if: ${{ vars.PUBLISH_OPENVSX == 'true' }}
+    steps:
+      - name: Download VSIX
+        uses: actions/download-artifact@v4
+        with:
+          name: vsix
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ${{ env.NODE_VERSION_FILE }}
+
+      - name: Install ovsx CLI
+        run: npm install -g ovsx
+
+      - name: Publish to Open VSX
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          ovsx publish "${{ needs.package.outputs.vsix-name }}" -p "${OVSX_PAT}"
+          echo "Published ${{ needs.package.outputs.vsix-name }} to Open VSX"
+
+  # ───────────────────────────────────────────
+  # Step 4: Create GitHub Release with VSIX
+  # ───────────────────────────────────────────
+  github-release:
+    name: GitHub Release
+    needs: [package, publish-marketplace]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download VSIX
+        uses: actions/download-artifact@v4
+        with:
+          name: vsix
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "prmpt v${{ needs.package.outputs.version }}"
+          body: |
+            ## prmpt v${{ needs.package.outputs.version }}
+
+            ### Installation
+            - **Marketplace**: Search "prmpt" in VS Code Extensions
+            - **Manual**: Download the attached `.vsix` and run `code --install-extension prmpt-${{ needs.package.outputs.version }}.vsix`
+
+            ### Rollback
+            To revert: `scripts/rollback-vsix.sh <previous-version>`
+          files: ${{ needs.package.outputs.vsix-name }}
+          draft: false
+          prerelease: false

@@ -200,6 +200,98 @@ test("runPipeline analyze pass warns about unsupported format", async () => {
   assert.ok(ctx.warnings.some((w) => /not optimal/i.test(w)));
 });
 
+// --- Technique selection pipeline tests (ST-10-01) ---
+
+test("runPipeline uses request techniques when provided", async () => {
+  const ctx = await runPipeline(
+    {
+      prompt: "Explain closures in JavaScript",
+      modelFamily: "gpt",
+      outputFormat: "markdown",
+      techniques: ["role-priming", "chain-of-thought"]
+    },
+    { adapter: createNoopAdapter("openai") }
+  );
+
+  assert.deepEqual(ctx.selectedTechniques, ["role-priming", "chain-of-thought"]);
+  assert.ok(ctx.enrichedPrompt.includes("[Role:"));
+  assert.ok(ctx.enrichedPrompt.includes("[Think step-by-step"));
+});
+
+test("runPipeline falls back to rulePack techniques when none specified", async () => {
+  const ctx = await runPipeline(
+    {
+      prompt: "Explain closures",
+      modelFamily: "claude",
+      outputFormat: "xml"
+    },
+    { adapter: createNoopAdapter("anthropic") }
+  );
+
+  // Claude rule pack default techniques
+  assert.ok(ctx.selectedTechniques.includes("xml-tagging"));
+  assert.ok(ctx.selectedTechniques.includes("role-priming"));
+});
+
+test("runPipeline warns on incompatible technique selection", async () => {
+  const ctx = await runPipeline(
+    {
+      prompt: "Optimize this for local model",
+      modelFamily: "claude",
+      outputFormat: "text",
+      techniques: ["simplification"]
+    },
+    { adapter: createNoopAdapter("anthropic") }
+  );
+
+  assert.ok(ctx.warnings.some((w) => /not compatible/i.test(w)));
+});
+
+test("runPipeline enrich pass applies xml-tagging wrapper", async () => {
+  const ctx = await runPipeline(
+    {
+      prompt: "Analyze this code",
+      modelFamily: "claude",
+      outputFormat: "xml",
+      techniques: ["xml-tagging"]
+    },
+    { adapter: createNoopAdapter("anthropic") }
+  );
+
+  assert.ok(ctx.enrichedPrompt.includes("<task>"));
+  assert.ok(ctx.enrichedPrompt.includes("</task>"));
+  assert.ok(ctx.enrichedPrompt.includes("Analyze this code"));
+});
+
+test("runPipeline enrich pass applies output-constraints", async () => {
+  const ctx = await runPipeline(
+    {
+      prompt: "List the bugs",
+      modelFamily: "gpt",
+      outputFormat: "json",
+      techniques: ["output-constraints"]
+    },
+    { adapter: createNoopAdapter("openai") }
+  );
+
+  assert.ok(ctx.enrichedPrompt.includes("[Output format: json"));
+});
+
+test("runPipeline empty techniques array uses rulePack defaults", async () => {
+  const ctx = await runPipeline(
+    {
+      prompt: "Test with empty techniques",
+      modelFamily: "gpt",
+      outputFormat: "markdown",
+      techniques: []
+    },
+    { adapter: createNoopAdapter("openai") }
+  );
+
+  // Empty array → falls back to rulePack defaults
+  assert.ok(ctx.selectedTechniques.length > 0);
+});
+
 // --- Renderer tests (ST-05-03) ---
 
 test("XML renderer produces valid XML with escaping", () => {
@@ -420,4 +512,152 @@ test("scorePrompt score bands match rubric labels", () => {
 
   // Minimal prompt should score low
   assert.ok(result.total < 60, `Expected score < 60 but got ${result.total}`);
+});
+
+// --- ST-10-02: Suggestion generator tests ---
+
+test("scorePrompt returns confidence metadata", () => {
+  const result = scorePrompt({
+    prompt: "You are an expert. Goal: Analyze this code. Context: Production Node.js. Constraint: Focus on security. Output: JSON list.",
+    modelFamily: "gpt",
+    outputFormat: "json",
+    rulePack: getRulePack("gpt")
+  });
+
+  assert.ok(result.confidence);
+  assert.ok(["low", "medium", "high"].includes(result.confidence.level));
+  assert.ok(result.confidence.reason.length > 0);
+});
+
+test("scorePrompt returns low confidence for very short prompt", () => {
+  const result = scorePrompt({
+    prompt: "Hi",
+    modelFamily: "gpt",
+    outputFormat: "text",
+    rulePack: getRulePack("gpt")
+  });
+
+  assert.equal(result.confidence.level, "low");
+});
+
+test("scorePrompt generates suggestions for low-scoring prompts", () => {
+  const result = scorePrompt({
+    prompt: "fix bug",
+    modelFamily: "gpt",
+    outputFormat: "text",
+    rulePack: getRulePack("gpt")
+  });
+
+  assert.ok(Array.isArray(result.suggestions));
+  assert.ok(result.suggestions.length > 0, "Should have at least one suggestion");
+
+  for (const s of result.suggestions) {
+    assert.ok(s.dimension, "suggestion should have dimension");
+    assert.ok(["high", "medium", "low"].includes(s.priority), "suggestion should have priority");
+    assert.ok(s.message.length > 0, "suggestion should have message");
+  }
+});
+
+test("scorePrompt generates no suggestions for well-structured prompts", () => {
+  const result = scorePrompt({
+    prompt: "You are an expert code reviewer.\n\nGoal: Review the following function for bugs and performance issues.\n\nContext: Production Node.js API handling 10k req/s.\n\nConstraints:\n- Must not exceed 500 words\n- Focus on security and performance\n- Avoid false positives\n\nOutput: Return as structured JSON with severity, location, and recommendation.\n\n1) Analyze the function signature\n2) Check error handling\n3) Review async patterns\n4) Identify performance bottlenecks\n\nExample:\n{\"severity\": \"high\", \"location\": \"line 42\", \"recommendation\": \"Add null check\"}",
+    modelFamily: "gpt",
+    outputFormat: "json",
+    rulePack: getRulePack("gpt")
+  });
+
+  // Well-structured prompt should have few or no suggestions
+  const highPriority = result.suggestions.filter((s) => s.priority === "high");
+  assert.equal(highPriority.length, 0, "Well-structured prompt should have no high-priority suggestions");
+});
+
+test("scorePrompt suggestions reference correct reason codes", () => {
+  const result = scorePrompt({
+    prompt: "do something",
+    modelFamily: "claude",
+    outputFormat: "xml",
+    rulePack: getRulePack("claude")
+  });
+
+  // Should have suggestions with reason codes matching dimension reasons
+  const withReasonCodes = result.suggestions.filter((s) => s.reasonCode !== undefined);
+  for (const s of withReasonCodes) {
+    assert.ok(
+      result.reasons.includes(s.reasonCode),
+      `Suggestion reason "${s.reasonCode}" should be in overall reasons`
+    );
+  }
+});
+
+// --- ST-10-02: Golden fixture regression tests ---
+
+test("FIXTURE: well-structured GPT prompt scores consistently", () => {
+  const input = {
+    prompt: "You are an expert prompt engineer.\n\nGoal: Rewrite the following prompt.\n\nContext: Production API.\n\nConstraints:\n- Must not exceed 500 words\n- Avoid ambiguity\n\nOutput: Return result as structured markdown.\n\n1) Analyze the prompt\n2) Identify improvements\n3) Deliver optimized version",
+    modelFamily: "gpt",
+    outputFormat: "markdown",
+    rulePack: getRulePack("gpt")
+  };
+
+  const r1 = scorePrompt(input);
+  const r2 = scorePrompt(input);
+
+  // Deterministic
+  assert.equal(r1.total, r2.total);
+  assert.deepEqual(r1.dimensions, r2.dimensions);
+  assert.deepEqual(r1.suggestions, r2.suggestions);
+  assert.deepEqual(r1.confidence, r2.confidence);
+
+  // Score should be in good+ range
+  assert.ok(r1.total >= 60, `Expected score >= 60 but got ${r1.total}`);
+  assert.ok(["good", "very_good", "excellent"].includes(r1.label));
+});
+
+test("FIXTURE: minimal prompt scores consistently low", () => {
+  const input = {
+    prompt: "help",
+    modelFamily: "local",
+    outputFormat: "text",
+    rulePack: getRulePack("local")
+  };
+
+  const r1 = scorePrompt(input);
+  const r2 = scorePrompt(input);
+
+  assert.equal(r1.total, r2.total);
+  assert.ok(r1.total < 50, `Expected score < 50 but got ${r1.total}`);
+  assert.ok(["poor", "fair"].includes(r1.label));
+  assert.ok(r1.suggestions.length > 0, "Should have suggestions for low-scoring prompt");
+});
+
+test("FIXTURE: Claude XML prompt scores technique usage highly", () => {
+  const input = {
+    prompt: "<task>You are an expert analyst.</task>\n<context>Production system with 99.9% SLA.</context>\n<constraints>Must not expose PII. Limit response to 200 words.</constraints>\n<output>Return analysis as XML with severity tags.</output>",
+    modelFamily: "claude",
+    outputFormat: "xml",
+    rulePack: getRulePack("claude")
+  };
+
+  const r1 = scorePrompt(input);
+  const r2 = scorePrompt(input);
+
+  assert.equal(r1.total, r2.total);
+  const techDim = r1.dimensions.find((d) => d.dimension === "techniqueUsage");
+  assert.ok(techDim);
+  assert.ok(techDim.score >= 50, `Expected technique score >= 50 but got ${techDim.score}`);
+});
+
+test("FIXTURE: dimension count is always 5", () => {
+  const families = ["claude", "gpt", "gemini", "local"];
+  for (const family of families) {
+    const result = scorePrompt({
+      prompt: "Test prompt for " + family,
+      modelFamily: family,
+      outputFormat: "text",
+      rulePack: getRulePack(family)
+    });
+    assert.equal(result.dimensions.length, 5, `${family} should have 5 dimensions`);
+    assert.ok(result.confidence, `${family} should have confidence`);
+    assert.ok(Array.isArray(result.suggestions), `${family} should have suggestions array`);
+  }
 });

@@ -946,3 +946,75 @@ export class InMemoryPromptHistoryRepository implements PromptHistoryRepository 
     return `hist-${Date.now().toString(36)}-${this.idCounter}`;
   }
 }
+
+// --- P2 Bridge: SQLite schema placeholders (ST-10-05) ---
+// These are schema definitions for future P2 features (F10 Diff / F11 Wizard).
+// They define table structures but are NOT instantiated until P2 execution.
+// Feature-flagged behind `context_injector` or separate P2 flags.
+
+export const P2_SQLITE_SCHEMAS = {
+  /**
+   * Stores prompt optimization diff results for the Diff Viewer (F10).
+   * Enables users to compare original vs optimized prompts with change tracking.
+   */
+  diffResults: `
+    CREATE TABLE IF NOT EXISTS diff_results (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      original_prompt TEXT NOT NULL,
+      optimized_prompt TEXT NOT NULL,
+      segments_json TEXT NOT NULL,
+      total_additions INTEGER NOT NULL DEFAULT 0,
+      total_removals INTEGER NOT NULL DEFAULT 0,
+      similarity_score REAL NOT NULL DEFAULT 0,
+      model_family TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(clerk_user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_diff_results_user ON diff_results(user_id);
+    CREATE INDEX IF NOT EXISTS idx_diff_results_created ON diff_results(created_at);
+  `,
+
+  /**
+   * Stores wizard session state for the Prompt Wizard (F11).
+   * Supports step-by-step guided optimization with persistence.
+   */
+  wizardSessions: `
+    CREATE TABLE IF NOT EXISTS wizard_sessions (
+      session_id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      current_step_index INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'in_progress',
+      steps_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(clerk_user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_wizard_user ON wizard_sessions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_wizard_status ON wizard_sessions(status);
+  `
+} as const;
+
+/** P2 repository interface for Diff Viewer (F10) — defer-ready */
+export interface DiffResultRepository {
+  saveDiff(userId: string, diff: {
+    originalPrompt: string;
+    optimizedPrompt: string;
+    segmentsJson: string;
+    totalAdditions: number;
+    totalRemovals: number;
+    similarityScore: number;
+    modelFamily: string;
+  }): Promise<{ id: string }>;
+  getDiff(userId: string, diffId: string): Promise<unknown | undefined>;
+  listDiffs(userId: string, limit?: number): Promise<unknown[]>;
+}
+
+/** P2 repository interface for Wizard Sessions (F11) — defer-ready */
+export interface WizardSessionRepository {
+  createSession(userId: string, steps: unknown[]): Promise<{ sessionId: string }>;
+  getSession(sessionId: string): Promise<unknown | undefined>;
+  updateStep(sessionId: string, stepIndex: number, data: unknown): Promise<void>;
+  completeSession(sessionId: string): Promise<void>;
+  abandonSession(sessionId: string): Promise<void>;
+}

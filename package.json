@@ -21,7 +21,8 @@
     "setup:hooks": "bash scripts/install-git-hooks.sh",
     "changeset": "changeset",
     "check:deps": "node scripts/check-dependency-direction.mjs",
-    "check:gate-b": "bash scripts/check-gate-b.sh"
+    "check:gate-b": "bash scripts/check-gate-b.sh",
+    "check:test-counts": "node scripts/verify-test-counts.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.7",

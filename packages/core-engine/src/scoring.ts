@@ -24,6 +24,22 @@ export interface ScoreResult {
   label: "poor" | "fair" | "good" | "very_good" | "excellent";
   dimensions: DimensionScore[];
   reasons: ReasonCode[];
+  confidence: ScoreConfidence;
+  suggestions: ScoreSuggestion[];
+}
+
+export type ConfidenceLevel = "low" | "medium" | "high";
+
+export interface ScoreConfidence {
+  level: ConfidenceLevel;
+  reason: string;
+}
+
+export interface ScoreSuggestion {
+  dimension: string;
+  priority: "high" | "medium" | "low";
+  message: string;
+  reasonCode: ReasonCode | undefined;
 }
 
 export interface ScoreInput {
@@ -232,16 +248,12 @@ function scoreTechniqueUsage(prompt: string, rulePack: RulePack): { score: numbe
         if (/<[a-z][a-z0-9_-]*>/i.test(prompt)) matchCount++;
         break;
       case "role-priming":
-      case "explicit_role":
         if (/\b(you are|act as|role|expert|specialist)\b/i.test(prompt)) matchCount++;
         break;
       case "step-decomposition":
-      case "step_decomposition":
         if (/\b(step[- ]?\d|first|second|third|then|next|finally)\b/i.test(prompt)) matchCount++;
         break;
       case "output-constraints":
-      case "constraints_block":
-      case "ordered_requirements":
         if (/\b(constraint|must|require|format|output)\b/i.test(prompt)) matchCount++;
         break;
       case "few-shot-priming":
@@ -329,8 +341,10 @@ export function scorePrompt(input: ScoreInput): ScoreResult {
   const total = Math.round(dimensions.reduce((acc, d) => acc + d.weighted, 0));
   const allReasons = [...new Set(dimensions.flatMap((d) => d.reasons))];
   const label = getScoreLabel(total);
+  const confidence = computeConfidence(input.prompt, dimensions);
+  const suggestions = generateSuggestions(dimensions);
 
-  return { total, label, dimensions, reasons: allReasons };
+  return { total, label, dimensions, reasons: allReasons, confidence, suggestions };
 }
 
 function getScoreLabel(total: number): ScoreResult["label"] {
@@ -339,6 +353,92 @@ function getScoreLabel(total: number): ScoreResult["label"] {
   if (total >= 60) return "good";
   if (total >= 40) return "fair";
   return "poor";
+}
+
+// --- Confidence computation (ST-10-02) ---
+
+function computeConfidence(prompt: string, dimensions: DimensionScore[]): ScoreConfidence {
+  const len = prompt.length;
+
+  // Very short or very long prompts yield lower confidence
+  if (len < 20) {
+    return { level: "low", reason: "Prompt is too short for reliable scoring." };
+  }
+
+  // Check dimension spread — if all dimensions are within a narrow band, confidence is higher
+  const scores = dimensions.map((d) => d.score);
+  const range = Math.max(...scores) - Math.min(...scores);
+
+  if (range > 50) {
+    return { level: "medium", reason: "Wide score variation across dimensions may indicate an unusual prompt structure." };
+  }
+
+  if (len > 5000) {
+    return { level: "medium", reason: "Long prompts may have scoring artifacts in structure detection." };
+  }
+
+  return { level: "high", reason: "Scoring heuristics have sufficient signal from the prompt." };
+}
+
+// --- Suggestion generator (ST-10-02) ---
+
+const DIMENSION_SUGGESTIONS: Record<string, Array<{ threshold: number; reasonCode: ReasonCode | undefined; message: string }>> = {
+  completeness: [
+    { threshold: 50, reasonCode: "ambiguous_objective", message: "Add a clear goal or objective statement (e.g., 'Goal: ...' or 'Task: ...')." },
+    { threshold: 50, reasonCode: "insufficient_context", message: "Include background context to help the model understand the domain." },
+    { threshold: 50, reasonCode: "missing_constraints", message: "Add explicit constraints (e.g., 'Do not...', 'Limit to...', 'Must include...')." },
+    { threshold: 50, reasonCode: "missing_output_contract", message: "Specify the desired output format (e.g., 'Return as JSON', 'Format as markdown list')." }
+  ],
+  clarity: [
+    { threshold: 50, reasonCode: "ambiguous_objective", message: "Use imperative verbs (generate, analyze, list) instead of vague language." },
+    { threshold: 60, reasonCode: undefined, message: "Break instructions into numbered steps for sequential clarity." },
+    { threshold: 60, reasonCode: undefined, message: "Remove hedging words like 'maybe', 'perhaps', 'possibly'." }
+  ],
+  structure: [
+    { threshold: 50, reasonCode: "structure_inconsistency", message: "Add section headings or structural markers (## Heading, **Bold labels:**)." },
+    { threshold: 60, reasonCode: undefined, message: "Use numbered lists or bullet points to organize requirements." },
+    { threshold: 60, reasonCode: undefined, message: "Consider using XML tags (<task>, <context>) for clearer semantic structure." }
+  ],
+  modelFit: [
+    { threshold: 50, reasonCode: "model_family_mismatch", message: "Align prompt style with the target model's strengths (e.g., XML for Claude, examples for GPT)." },
+    { threshold: 60, reasonCode: undefined, message: "Review model-specific best practices for the selected family." }
+  ],
+  techniqueUsage: [
+    { threshold: 50, reasonCode: "overuse_of_techniques", message: "Consider reducing technique count — fewer well-applied techniques are more effective." },
+    { threshold: 50, reasonCode: undefined, message: "Apply at least one recommended technique for the selected model family." }
+  ]
+};
+
+function generateSuggestions(dimensions: DimensionScore[]): ScoreSuggestion[] {
+  const suggestions: ScoreSuggestion[] = [];
+
+  for (const dim of dimensions) {
+    const dimSuggestions = DIMENSION_SUGGESTIONS[dim.dimension];
+    if (!dimSuggestions) continue;
+
+    for (const s of dimSuggestions) {
+      // Only suggest if dimension score is below threshold
+      if (dim.score >= s.threshold) continue;
+
+      // If the suggestion has a specific reasonCode, only include if that reason was triggered
+      if (s.reasonCode !== undefined && !dim.reasons.includes(s.reasonCode)) continue;
+
+      const priority = dim.score < 30 ? "high" : dim.score < 50 ? "medium" : "low";
+
+      suggestions.push({
+        dimension: dim.dimension,
+        priority,
+        message: s.message,
+        reasonCode: s.reasonCode
+      });
+    }
+  }
+
+  // Sort: high priority first, then by dimension weight
+  const priorityOrder = { high: 0, medium: 1, low: 2 };
+  suggestions.sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority]);
+
+  return suggestions;
 }
 
 function clamp(value: number): number {

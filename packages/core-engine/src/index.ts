@@ -1,4 +1,13 @@
-import { getRulePack, type ModelFamily, type OutputFormat, type RulePack } from "@prmpt/model-rules";
+import {
+  getRulePack,
+  getCompatibleTechniques,
+  validateTechniqueSelection,
+  getTechnique,
+  type ModelFamily,
+  type OutputFormat,
+  type RulePack,
+  type TechniqueId
+} from "@prmpt/model-rules";
 import {
   createNoopAdapter,
   normalizeProviderError,
@@ -13,7 +22,7 @@ import { scorePrompt, type ScoreResult } from "./scoring.js";
 export { getRenderer, createXmlRenderer, createJsonRenderer, createMarkdownRenderer, createTextRenderer, listRendererFormats } from "./renderers.js";
 export type { Renderer, RenderInput, RenderOutput } from "./renderers.js";
 export { scorePrompt } from "./scoring.js";
-export type { ScoreResult, ScoreInput, DimensionScore, ReasonCode } from "./scoring.js";
+export type { ScoreResult, ScoreInput, DimensionScore, ReasonCode, ScoreConfidence, ConfidenceLevel, ScoreSuggestion } from "./scoring.js";
 
 // --- Pipeline types ---
 
@@ -39,6 +48,7 @@ export interface PipelineContext {
   modelFamily: ModelFamily;
   outputFormat: OutputFormat;
   rulePack: RulePack;
+  selectedTechniques: TechniqueId[];
   enrichedPrompt: string;
   optimizedPrompt: string;
   renderedOutput: string;
@@ -94,7 +104,54 @@ export function createEnrichPass(): PipelinePass {
   return {
     name: "enrich",
     async execute(ctx) {
-      return { ...ctx, enrichedPrompt: ctx.normalizedPrompt };
+      const techniques = ctx.selectedTechniques;
+      if (techniques.length === 0) {
+        return { ...ctx, enrichedPrompt: ctx.normalizedPrompt };
+      }
+
+      // Build enrichment layers in technique application order
+      const layers: string[] = [];
+
+      for (const techId of techniques) {
+        const desc = getTechnique(techId);
+        switch (techId) {
+          case "role-priming":
+            if (!/\b(you are|act as)\b/i.test(ctx.normalizedPrompt)) {
+              layers.push("[Role: You are an expert assistant.]");
+            }
+            break;
+          case "xml-tagging":
+            layers.push(`<task>\n${ctx.normalizedPrompt}\n</task>`);
+            break;
+          case "step-decomposition":
+            layers.push("[Instruction: Break your response into numbered steps.]");
+            break;
+          case "output-constraints":
+            layers.push(`[Output format: ${ctx.outputFormat}. Be precise and structured.]`);
+            break;
+          case "few-shot-priming":
+            layers.push("[Include relevant examples to demonstrate the expected pattern.]");
+            break;
+          case "chain-of-thought":
+            layers.push("[Think step-by-step and show your reasoning before the final answer.]");
+            break;
+          case "simplification":
+            layers.push("[Keep the response concise, direct, and simple.]");
+            break;
+          default: {
+            // extensible: unrecognized techniques are annotated
+            layers.push(`[Technique: ${desc.label}]`);
+          }
+        }
+      }
+
+      // Compose enriched prompt: layers first, then the original prompt (unless xml-tagging already wrapped it)
+      const hasXmlWrap = techniques.includes("xml-tagging");
+      const prompt = hasXmlWrap
+        ? layers.join("\n")
+        : [...layers, ctx.normalizedPrompt].join("\n");
+
+      return { ...ctx, enrichedPrompt: prompt };
     }
   };
 }
@@ -189,12 +246,27 @@ export async function runPipeline(
   const adapter =
     options.adapter ?? createNoopAdapter(getProviderIdForModelFamily(input.modelFamily));
 
+  // Resolve techniques: use request techniques if provided, otherwise rule pack defaults
+  let selectedTechniques: TechniqueId[];
+  const warnings: string[] = [];
+
+  if (input.techniques && input.techniques.length > 0) {
+    const validation = validateTechniqueSelection(input.techniques, input.modelFamily);
+    selectedTechniques = validation.resolved;
+    if (validation.warnings.length > 0) {
+      warnings.push(...validation.warnings);
+    }
+  } else {
+    selectedTechniques = rulePack.techniques;
+  }
+
   let context: PipelineContext = {
     originalPrompt: input.prompt,
     normalizedPrompt: "",
     modelFamily: input.modelFamily,
     outputFormat: input.outputFormat,
     rulePack,
+    selectedTechniques,
     enrichedPrompt: "",
     optimizedPrompt: "",
     renderedOutput: "",
@@ -209,7 +281,7 @@ export async function runPipeline(
       rulePackVersion: rulePack.version,
       contentType: "text/plain"
     },
-    warnings: [],
+    warnings,
     adapter
   };
 

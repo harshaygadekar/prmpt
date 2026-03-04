@@ -6,10 +6,22 @@ export type ModelFamily = z.infer<typeof modelFamilySchema>;
 export const outputFormatSchema = z.enum(["xml", "json", "markdown", "text"]);
 export type OutputFormat = z.infer<typeof outputFormatSchema>;
 
+export const techniqueIdSchema = z.enum([
+  "xml-tagging",
+  "role-priming",
+  "step-decomposition",
+  "output-constraints",
+  "few-shot-priming",
+  "chain-of-thought",
+  "simplification"
+]);
+export type TechniqueId = z.infer<typeof techniqueIdSchema>;
+
 export const optimizePromptRequestSchema = z.object({
   prompt: z.string().trim().min(1),
   modelFamily: modelFamilySchema,
-  outputFormat: outputFormatSchema
+  outputFormat: outputFormatSchema,
+  techniques: z.array(techniqueIdSchema).optional()
 });
 export type OptimizePromptRequest = z.infer<typeof optimizePromptRequestSchema>;
 
@@ -309,3 +321,58 @@ export const promptHistoryDeleteRequestSchema = z.object({
   entryId: z.string().min(1)
 });
 export type PromptHistoryDeleteRequest = z.infer<typeof promptHistoryDeleteRequestSchema>;
+
+// --- P2 Bridge Contracts (ST-10-05) ---
+// These are draft contracts for future F10 (Diff Viewer) and F11 (Prompt Wizard).
+// They are NOT used in P0/P1 code paths. Feature-flagged and defer-ready.
+
+export const diffChangeTypeSchema = z.enum(["added", "removed", "modified", "unchanged"]);
+export type DiffChangeType = z.infer<typeof diffChangeTypeSchema>;
+
+export const diffSegmentSchema = z.object({
+  type: diffChangeTypeSchema,
+  content: z.string(),
+  lineStart: z.number().int().nonnegative(),
+  lineEnd: z.number().int().nonnegative()
+});
+export type DiffSegment = z.infer<typeof diffSegmentSchema>;
+
+export const diffResultSchema = z.object({
+  originalPrompt: z.string().min(1),
+  optimizedPrompt: z.string().min(1),
+  segments: z.array(diffSegmentSchema),
+  totalAdditions: z.number().int().nonnegative(),
+  totalRemovals: z.number().int().nonnegative(),
+  similarityScore: z.number().min(0).max(1)
+});
+export type DiffResult = z.infer<typeof diffResultSchema>;
+
+export const wizardStepTypeSchema = z.enum([
+  "model_selection",
+  "technique_selection",
+  "context_injection",
+  "prompt_input",
+  "review_optimize",
+  "result_display"
+]);
+export type WizardStepType = z.infer<typeof wizardStepTypeSchema>;
+
+export const wizardStepSchema = z.object({
+  id: z.string().min(1),
+  type: wizardStepTypeSchema,
+  label: z.string().min(1),
+  order: z.number().int().nonnegative(),
+  completed: z.boolean(),
+  data: z.record(z.string(), z.unknown()).optional()
+});
+export type WizardStep = z.infer<typeof wizardStepSchema>;
+
+export const wizardStateSchema = z.object({
+  sessionId: z.string().min(1),
+  currentStepIndex: z.number().int().nonnegative(),
+  steps: z.array(wizardStepSchema).min(1),
+  status: z.enum(["in_progress", "completed", "abandoned"]),
+  createdAt: z.string().min(1),
+  updatedAt: z.string().min(1)
+});
+export type WizardState = z.infer<typeof wizardStateSchema>;

@@ -8,3 +8,4 @@ export function createCorrelationId(seed = Date.now()): string {
 
 export * from "./env.js";
 export * from "./redaction.js";
+export * from "./feature-flags.js";

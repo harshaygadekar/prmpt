@@ -1,6 +1,191 @@
 export type ModelFamily = "claude" | "gpt" | "gemini" | "local";
 export type OutputFormat = "xml" | "json" | "markdown" | "text";
 
+// --- Technique Registry (ST-10-01) ---
+
+export type TechniqueId =
+  | "xml-tagging"
+  | "role-priming"
+  | "step-decomposition"
+  | "output-constraints"
+  | "few-shot-priming"
+  | "chain-of-thought"
+  | "simplification";
+
+export type TechniqueCategory = "structure" | "reasoning" | "context" | "output";
+
+export interface TechniqueDescriptor {
+  id: TechniqueId;
+  label: string;
+  description: string;
+  category: TechniqueCategory;
+  /** Families this technique works well with */
+  compatibleFamilies: ModelFamily[];
+  /** Techniques that must not be combined with this one */
+  conflictsWith: TechniqueId[];
+  /** Application priority (lower = applied first) */
+  order: number;
+}
+
+const TECHNIQUE_REGISTRY: Record<TechniqueId, TechniqueDescriptor> = {
+  "xml-tagging": {
+    id: "xml-tagging",
+    label: "XML Tagging",
+    description: "Wraps prompt sections in XML tags for semantic clarity. Best for Claude.",
+    category: "structure",
+    compatibleFamilies: ["claude", "gpt", "gemini"],
+    conflictsWith: [],
+    order: 10
+  },
+  "role-priming": {
+    id: "role-priming",
+    label: "Role Priming",
+    description: "Prepends an expert persona definition to set behavioral context.",
+    category: "context",
+    compatibleFamilies: ["claude", "gpt", "gemini", "local"],
+    conflictsWith: [],
+    order: 5
+  },
+  "step-decomposition": {
+    id: "step-decomposition",
+    label: "Step Decomposition",
+    description: "Breaks complex instructions into numbered steps for sequential processing.",
+    category: "reasoning",
+    compatibleFamilies: ["claude", "gpt", "gemini"],
+    conflictsWith: ["simplification"],
+    order: 20
+  },
+  "output-constraints": {
+    id: "output-constraints",
+    label: "Output Constraints",
+    description: "Defines explicit format, length, and content boundaries for the response.",
+    category: "output",
+    compatibleFamilies: ["claude", "gpt", "gemini", "local"],
+    conflictsWith: [],
+    order: 30
+  },
+  "few-shot-priming": {
+    id: "few-shot-priming",
+    label: "Few-Shot Priming",
+    description: "Includes input/output examples to demonstrate desired behavior pattern.",
+    category: "context",
+    compatibleFamilies: ["gpt", "claude", "gemini"],
+    conflictsWith: ["simplification"],
+    order: 15
+  },
+  "chain-of-thought": {
+    id: "chain-of-thought",
+    label: "Chain of Thought",
+    description: "Instructs model to show reasoning steps before producing final answer.",
+    category: "reasoning",
+    compatibleFamilies: ["gpt", "gemini", "claude"],
+    conflictsWith: ["simplification"],
+    order: 25
+  },
+  "simplification": {
+    id: "simplification",
+    label: "Simplification",
+    description: "Reduces prompt complexity for smaller or resource-constrained models.",
+    category: "structure",
+    compatibleFamilies: ["local", "gemini"],
+    conflictsWith: ["step-decomposition", "few-shot-priming", "chain-of-thought"],
+    order: 5
+  }
+};
+
+export function getTechnique(id: TechniqueId): TechniqueDescriptor {
+  const technique = TECHNIQUE_REGISTRY[id];
+  if (!technique) {
+    throw new Error(`Unknown technique: ${id}`);
+  }
+  return technique;
+}
+
+export function listTechniques(): TechniqueDescriptor[] {
+  return Object.values(TECHNIQUE_REGISTRY);
+}
+
+export function listTechniqueIds(): TechniqueId[] {
+  return Object.keys(TECHNIQUE_REGISTRY) as TechniqueId[];
+}
+
+export function isTechniqueId(value: string): value is TechniqueId {
+  return value in TECHNIQUE_REGISTRY;
+}
+
+/**
+ * Returns techniques compatible with the given model family,
+ * sorted by application order (ascending).
+ */
+export function getCompatibleTechniques(family: ModelFamily): TechniqueDescriptor[] {
+  return Object.values(TECHNIQUE_REGISTRY)
+    .filter((t) => t.compatibleFamilies.includes(family))
+    .sort((a, b) => a.order - b.order);
+}
+
+/**
+ * Validates a user-selected technique set against a model family.
+ * Returns { valid, resolved, conflicts, warnings }.
+ */
+export interface TechniqueValidationResult {
+  valid: boolean;
+  /** Resolved techniques in application order */
+  resolved: TechniqueId[];
+  /** Pairs of conflicting techniques */
+  conflicts: Array<[TechniqueId, TechniqueId]>;
+  /** Human-readable warnings */
+  warnings: string[];
+}
+
+export function validateTechniqueSelection(
+  selected: TechniqueId[],
+  family: ModelFamily
+): TechniqueValidationResult {
+  const warnings: string[] = [];
+  const conflicts: Array<[TechniqueId, TechniqueId]> = [];
+  const compatible = getCompatibleTechniques(family);
+  const compatibleIds = new Set(compatible.map((t) => t.id));
+
+  // Deduplicate preserving order
+  const unique = [...new Set(selected)];
+
+  // Check compatibility
+  for (const id of unique) {
+    if (!compatibleIds.has(id)) {
+      warnings.push(`Technique "${id}" is not compatible with model family "${family}".`);
+    }
+  }
+
+  // Check conflicts
+  for (const idA of unique) {
+    const a = TECHNIQUE_REGISTRY[idA];
+    for (const idB of unique) {
+      if (idA === idB) continue;
+      if (a.conflictsWith.includes(idB)) {
+        // Only add once (ordered pair avoids duplicates)
+        if (idA < idB && !conflicts.some(([x, y]) => x === idA && y === idB)) {
+          conflicts.push([idA, idB]);
+          warnings.push(`Techniques "${idA}" and "${idB}" conflict with each other.`);
+        }
+      }
+    }
+  }
+
+  // Sort by application order (deterministic)
+  const resolved = [...unique].sort((a, b) => {
+    return TECHNIQUE_REGISTRY[a].order - TECHNIQUE_REGISTRY[b].order;
+  });
+
+  return {
+    valid: conflicts.length === 0 && warnings.length === 0,
+    resolved,
+    conflicts,
+    warnings
+  };
+}
+
+// --- Rule Pack types ---
+
 export interface RulePackConstraints {
   maxTokens: number;
   temperature: { min: number; max: number; default: number };
@@ -12,7 +197,7 @@ export interface RulePack {
   version: string;
   preferredFormats: OutputFormat[];
   systemPromptTemplate: string;
-  techniques: string[];
+  techniques: TechniqueId[];
   constraints: RulePackConstraints;
 }
 
